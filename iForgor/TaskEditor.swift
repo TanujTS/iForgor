@@ -2,13 +2,14 @@ import SwiftUI
 
 struct TaskEditor: View {
     @Environment(\.dismiss) private var dismiss
-    @State private var draft: TaskItem
+    @State private var draft: TaskDraft
     @State private var hasScheduledDate: Bool
     @State private var scheduledDate: Date
-    let onSave: (TaskItem) -> Void
+    let onSave: (TaskDraft) -> Bool
+    @State private var saveFailed = false
 
     /// Edits a value copy so Cancel leaves the original task unchanged.
-    init(task: TaskItem, onSave: @escaping (TaskItem) -> Void) {
+    init(task: TaskDraft, onSave: @escaping (TaskDraft) -> Bool) {
         _draft = State(initialValue: task)
         _hasScheduledDate = State(initialValue: task.scheduledDate != nil)
         _scheduledDate = State(initialValue: task.scheduledDate ?? Date())
@@ -42,6 +43,11 @@ struct TaskEditor: View {
         }
         .padding(20)
         .frame(width: 340)
+        .alert("Task not saved", isPresented: $saveFailed) {
+            Button("OK", role: .cancel) { }
+        } message: {
+            Text("Your draft is still here. Close the editor to review the storage error, then retry after fixing it.")
+        }
     }
 
     /// Validates and normalizes the draft, then commits it once before closing the editor.
@@ -49,7 +55,6 @@ struct TaskEditor: View {
         draft.title = draft.title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !draft.title.isEmpty else { return }
         draft.scheduledDate = hasScheduledDate ? Calendar.current.startOfDay(for: scheduledDate) : nil
-        onSave(draft)
-        dismiss()
+        if onSave(draft) { dismiss() } else { saveFailed = true }
     }
 }
