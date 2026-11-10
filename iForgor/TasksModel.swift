@@ -24,11 +24,15 @@ final class TasksModel {
     var errorMessage: String?
 
     let account: GoogleAccount
+    let reminders: ReminderCenter
+    /// Task to reveal and open in the panel, e.g. after clicking its notification.
+    var focusedTaskID: String?
     @ObservationIgnored private let api: GoogleTasksAPI
     @ObservationIgnored private var refreshTask: Task<Void, Never>?
 
-    init(account: GoogleAccount) {
+    init(account: GoogleAccount, reminders: ReminderCenter) {
         self.account = account
+        self.reminders = reminders
         api = GoogleTasksAPI(account: account)
     }
 
@@ -50,6 +54,7 @@ final class TasksModel {
         } else {
             selectedListID = nil
             Self.deleteCache()
+            reminders.removeAll()
         }
     }
 
@@ -83,6 +88,7 @@ final class TasksModel {
                 isShowingCache = false
                 errorMessage = nil
                 saveCache()
+                reminders.reconcile(with: tasks)
             } catch {
                 guard !Task.isCancelled, account.email == email else { return }
                 isShowingCache = !lists.isEmpty
@@ -242,6 +248,7 @@ final class TasksModel {
 
     private func didChangeTasks() {
         saveCache()
+        reminders.reconcile(with: tasksByList)
     }
 
     private func fail(_ action: String, _ error: Error) {

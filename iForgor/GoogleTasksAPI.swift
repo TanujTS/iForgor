@@ -60,6 +60,26 @@ nonisolated struct DueDate: Hashable, Codable, Comparable {
     }
 }
 
+extension DueDate {
+    /// "Today", "Tomorrow", a weekday within the next week, otherwise a short date.
+    func relativeLabel(today: Date = Date(), calendar: Calendar = .current) -> (text: String, isToday: Bool, isOverdue: Bool) {
+        let start = calendar.startOfDay(for: today)
+        let days = calendar.dateComponents([.day], from: start, to: date(calendar: calendar)).day ?? 0
+        let text: String
+        switch days {
+        case 0: text = "Today"
+        case 1: text = "Tomorrow"
+        case -1: text = "Yesterday"
+        case 2...6: text = date(calendar: calendar).formatted(.dateTime.weekday(.wide))
+        default:
+            let sameYear = calendar.component(.year, from: start) == year
+            text = date(calendar: calendar).formatted(sameYear ? .dateTime.month(.abbreviated).day()
+                                                                : .dateTime.month(.abbreviated).day().year())
+        }
+        return (text, days == 0, days < 0)
+    }
+}
+
 /// Thin Google Tasks REST client. Every call reads all result pages and retries once after a 401
 /// with a fresh access token.
 struct GoogleTasksAPI {

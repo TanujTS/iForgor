@@ -115,12 +115,17 @@ private struct TasksPanel: View {
             listPills
             if model.selectedList != nil { quickAdd }
             taskList(arrangement)
-            if let error = model.changeError { errorBanner(error) }
+            if let error = model.changeError ?? model.reminders.message { errorBanner(error) }
             footer
         }
         .animation(Theme.spring, value: model.changeError)
-        .onAppear { model.refreshIfStale() }
-        .onChange(of: model.selectedListID) { editingTaskID = nil }
+        .animation(Theme.spring, value: model.reminders.message)
+        .onAppear {
+            model.refreshIfStale()
+            revealFocusedTask()
+        }
+        .onChange(of: model.focusedTaskID) { revealFocusedTask() }
+        .onChange(of: model.selectedListID) { if editingTaskID.flatMap(model.listID(ofTask:)) != model.selectedListID { editingTaskID = nil } }
         .alert("Delete “\(listToDelete?.title ?? "")”?", isPresented: Binding(
             get: { listToDelete != nil }, set: { if !$0 { listToDelete = nil } }
         )) {
@@ -338,6 +343,7 @@ private struct TasksPanel: View {
         } else {
             TaskRow(task: task, depth: depth,
                     isPending: model.pendingTaskIDs.contains(task.id),
+                    reminder: model.reminders.reminder(forTask: task.id)?.date,
                     onToggle: { model.setCompleted(!task.isCompleted, task: task) },
                     onEdit: { editingTaskID = task.id },
                     onDelete: { model.deleteTask(task) })
@@ -379,7 +385,7 @@ private struct TasksPanel: View {
             Image(systemName: "exclamationmark.circle.fill").foregroundStyle(Theme.overdue)
             Text(message).fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
-            Button { model.changeError = nil } label: { Image(systemName: "xmark") }
+            Button { dismissBanner() } label: { Image(systemName: "xmark") }
                 .buttonStyle(.plain)
                 .foregroundStyle(Theme.muted)
                 .accessibilityLabel("Dismiss")
@@ -393,8 +399,23 @@ private struct TasksPanel: View {
         .transition(.move(edge: .bottom).combined(with: .opacity))
         .task(id: message) {
             try? await Task.sleep(for: .seconds(8))
-            if model.changeError == message { model.changeError = nil }
+            if (model.changeError ?? model.reminders.message) == message { dismissBanner() }
         }
+    }
+
+    private func dismissBanner() {
+        model.changeError = nil
+        model.reminders.message = nil
+    }
+
+    /// Switches to the focused task's list and opens it in the editor.
+    private func revealFocusedTask() {
+        guard let taskID = model.focusedTaskID else { return }
+        model.focusedTaskID = nil
+        guard let listID = model.listID(ofTask: taskID) else { return }
+        model.selectedListID = listID
+        if model.task(withID: taskID)?.isCompleted == true { showCompleted = true }
+        editingTaskID = taskID
     }
 
     private var footer: some View {

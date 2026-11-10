@@ -8,7 +8,8 @@ struct LogicTests {
         dueDatesKeepTheirDay()
         relativeLabels()
         arrangesLikeGoogle()
-        print("PASS: decoding, due dates across time zones, relative labels, ordering")
+        remindersFollowTasks()
+        print("PASS: decoding, due dates across time zones, relative labels, ordering, reminder reconciliation")
     }
 
     /// Sample shaped like a Google Tasks list response, including fields the app ignores.
@@ -57,6 +58,28 @@ struct LogicTests {
         check(result.open.map(\.id) == ["first", "second", "child"], "position order with subtasks under parent")
         check(result.open.last?.depth == 1, "subtask depth")
         check(result.completed.map(\.id) == ["done"], "completed excludes hidden")
+    }
+
+    /// Reminders must disappear for completed, deleted, or past tasks and follow renames and moves.
+    static func remindersFollowTasks() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let later = now.addingTimeInterval(3600)
+        func reminder(_ id: String, _ date: Date) -> Reminder { Reminder(taskID: id, listID: "L1", title: "old", date: date) }
+        let reminders = [
+            "open": reminder("open", later), "done": reminder("done", later), "gone": reminder("gone", later),
+            "past": reminder("past", now.addingTimeInterval(-60)), "moved": reminder("moved", later),
+        ]
+        let tasks = [
+            "L1": [GTask(id: "open", title: "Renamed", status: "needsAction"),
+                   GTask(id: "done", title: "done", status: "completed"),
+                   GTask(id: "past", title: "past", status: "needsAction")],
+            "L2": [GTask(id: "moved", title: "moved", status: "needsAction")],
+        ]
+        let plan = ReminderCenter.plan(reminders: reminders, tasksByList: tasks, now: now)
+        check(Set(plan.keep.keys) == ["open", "moved"], "keep only open future reminders")
+        check(plan.removed == ["done", "gone", "past"], "remove completed, deleted, past")
+        check(plan.keep["open"]?.title == "Renamed", "follow rename")
+        check(plan.keep["moved"]?.listID == "L2", "follow move to another list")
     }
 
     static func check(_ condition: Bool, _ name: String) {

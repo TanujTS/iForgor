@@ -5,6 +5,7 @@ struct TaskRow: View {
     let task: GTask
     let depth: Int
     var isPending = false
+    var reminder: Date?
     var onToggle: () -> Void = {}
     var onEdit: () -> Void = {}
     var onDelete: () -> Void = {}
@@ -35,8 +36,16 @@ struct TaskRow: View {
                         .foregroundStyle(Theme.muted)
                         .lineLimit(1)
                 }
-                if !task.isCompleted, let due = task.dueDate {
-                    DueLabel(due: due)
+                if !task.isCompleted, task.dueDate != nil || reminder != nil {
+                    HStack(spacing: 10) {
+                        if let due = task.dueDate { DueLabel(due: due) }
+                        if let reminder {
+                            Label(reminder.reminderLabel, systemImage: "bell")
+                                .labelStyle(CompactLabelStyle())
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(Theme.muted)
+                        }
+                    }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -69,6 +78,8 @@ struct TaskEditorCard: View {
     @State private var notes: String
     @State private var due: DueDate?
     @State private var showingDatePicker = false
+    @State private var reminderDate: Date?
+    private let originalReminder: Date?
     @State private var isSaving = false
     @FocusState private var titleFocused: Bool
 
@@ -79,6 +90,8 @@ struct TaskEditorCard: View {
         _title = State(initialValue: task.title ?? "")
         _notes = State(initialValue: task.notes ?? "")
         _due = State(initialValue: task.dueDate)
+        originalReminder = model.reminders.reminder(forTask: task.id)?.date
+        _reminderDate = State(initialValue: originalReminder)
     }
 
     private var canSave: Bool { !title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isSaving }
@@ -132,6 +145,36 @@ struct TaskEditorCard: View {
                 }
             }
             .padding(.leading, 30)
+
+            if !task.isCompleted {
+                VStack(alignment: .leading, spacing: 8) {
+                    Button {
+                        withAnimation(Theme.spring) { reminderDate = reminderDate == nil ? defaultReminderDate : nil }
+                    } label: {
+                        fieldRow(symbol: "bell", title: "Remind me", value: reminderDate?.reminderLabel ?? "Add",
+                                 valueColor: reminderDate == nil ? Theme.muted : Theme.secondaryInk)
+                    }
+                    .buttonStyle(.plain)
+                    if reminderDate != nil {
+                        HStack {
+                            DatePicker("Reminder", selection: Binding(
+                                get: { reminderDate ?? defaultReminderDate }, set: { reminderDate = $0 }
+                            ), in: Date()..., displayedComponents: [.date, .hourAndMinute])
+                            .datePickerStyle(.field)
+                            .labelsHidden()
+                            .font(.system(size: 12))
+                            Spacer()
+                            Button { withAnimation(Theme.spring) { reminderDate = nil } } label: {
+                                Image(systemName: "xmark").chipStyle(selected: false)
+                            }
+                            .buttonStyle(PressableStyle())
+                            .accessibilityLabel("Remove reminder")
+                        }
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+                }
+                .padding(.leading, 30)
+            }
 
             HStack {
                 Button {
@@ -203,10 +246,28 @@ struct TaskEditorCard: View {
         guard canSave else { return }
         isSaving = true
         Task {
-            let saved = await model.updateTask(task, title: title, notes: notes, due: due)
-            isSaving = false
-            if saved { onClose() }
+            defer { isSaving = false }
+            guard await model.updateTask(task, title: title, notes: notes, due: due) else { return }
+            if reminderDate != originalReminder {
+                if let reminderDate, let listID = model.listID(ofTask: task.id) {
+                    let saved = model.task(withID: task.id) ?? task
+                    guard await model.reminders.set(reminderDate, for: saved, listID: listID) else { return }
+                } else {
+                    model.reminders.remove(taskID: task.id)
+                }
+            }
+            onClose()
         }
+    }
+
+    /// 9 AM on the deadline if that's still ahead, otherwise the next full hour.
+    private var defaultReminderDate: Date {
+        let calendar = Calendar.current
+        if let due, let nine = calendar.date(bySettingHour: 9, minute: 0, second: 0, of: due.date()), nine > Date() {
+            return nine
+        }
+        let nextHour = calendar.date(byAdding: .hour, value: 1, to: Date())!
+        return calendar.date(bySetting: .minute, value: 0, of: nextHour) ?? nextHour
     }
 }
 
@@ -272,25 +333,5 @@ struct CompactLabelStyle: LabelStyle {
             configuration.icon.imageScale(.small)
             configuration.title
         }
-    }
-}
-
-extension DueDate {
-    /// "Today", "Tomorrow", a weekday within the next week, otherwise a short date.
-    func relativeLabel(today: Date = Date(), calendar: Calendar = .current) -> (text: String, isToday: Bool, isOverdue: Bool) {
-        let start = calendar.startOfDay(for: today)
-        let days = calendar.dateComponents([.day], from: start, to: date(calendar: calendar)).day ?? 0
-        let text: String
-        switch days {
-        case 0: text = "Today"
-        case 1: text = "Tomorrow"
-        case -1: text = "Yesterday"
-        case 2...6: text = date(calendar: calendar).formatted(.dateTime.weekday(.wide))
-        default:
-            let sameYear = calendar.component(.year, from: start) == year
-            text = date(calendar: calendar).formatted(sameYear ? .dateTime.month(.abbreviated).day()
-                                                                : .dateTime.month(.abbreviated).day().year())
-        }
-        return (text, days == 0, days < 0)
     }
 }
