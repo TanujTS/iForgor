@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 
 /// Root of the menu bar panel: sign-in screen or the tasks panel.
@@ -460,6 +461,14 @@ private struct AccountMenu: View {
                 Text(email)
             }
             Divider()
+            Toggle("Launch at login", isOn: Binding(
+                get: { SMAppService.mainApp.status == .enabled },
+                set: setLaunchAtLogin
+            ))
+            Button("Notification settings…") {
+                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension")!)
+            }
+            Divider()
             Button("Sign out") { Task { await model.account.signOut() } }
             Button("Quit iForgor") { NSApplication.shared.terminate(nil) }
                 .keyboardShortcut("q")
@@ -475,6 +484,18 @@ private struct AccountMenu: View {
         .menuIndicator(.hidden)
         .fixedSize()
         .accessibilityLabel("Account")
+    }
+
+    private func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            if enabled {
+                try SMAppService.mainApp.register()
+            } else {
+                try SMAppService.mainApp.unregister()
+            }
+        } catch {
+            model.changeError = "Couldn't change Launch at login. \(error.localizedDescription)"
+        }
     }
 }
 

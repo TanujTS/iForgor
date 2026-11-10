@@ -1,4 +1,5 @@
 import AppKit
+import Network
 import SwiftUI
 import UserNotifications
 
@@ -18,6 +19,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     let account: GoogleAccount
     let reminders: ReminderCenter
     let tasks: TasksModel
+    private var refreshTimer: Timer?
+    private let networkMonitor = NWPathMonitor()
 
     override init() {
         account = GoogleAccount()
@@ -30,6 +33,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     func applicationDidFinishLaunching(_ notification: Notification) {
         UNUserNotificationCenter.current().delegate = self
         Task { await account.restore() }
+        startAutomaticRefresh()
+    }
+
+    /// Refreshes after waking from sleep, when the network comes back, and every 15 minutes,
+    /// so the panel and reminders pick up changes made on other devices.
+    private func startAutomaticRefresh() {
+        NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.didWakeNotification,
+                                                          object: nil, queue: .main) { [tasks] _ in
+            MainActor.assumeIsolated { tasks.refresh() }
+        }
+        refreshTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: true) { [tasks] _ in
+            MainActor.assumeIsolated { tasks.refreshIfStale(olderThan: 14 * 60) }
+        }
+        networkMonitor.pathUpdateHandler = { [tasks] path in
+            guard path.status == .satisfied else { return }
+            Task { @MainActor in
+                if tasks.errorMessage != nil { tasks.refresh() }
+            }
+        }
+        networkMonitor.start(queue: .main)
     }
 
     func application(_ application: NSApplication, open urls: [URL]) {
