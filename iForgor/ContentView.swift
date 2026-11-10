@@ -4,6 +4,8 @@ import SwiftUI
 
 struct ContentView: View {
     @Bindable var store: TaskStore
+    let account: GoogleAccount
+    @Environment(\.openWindow) private var openWindow
     @State private var newTaskTitle = ""
     @State private var editingTask: TaskDraft?
     @State private var listName = ""
@@ -21,9 +23,12 @@ struct ContentView: View {
                 Text("iForgor")
                     .font(.title3.bold())
                 Spacer()
-                Text("Local tasks")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Button(account.email ?? "Sign in with Google") {
+                    openWindow(id: "account")
+                    NSApplication.shared.activate()
+                }
+                .buttonStyle(.link)
+                .font(.caption)
             }
 
             HStack {
@@ -204,7 +209,7 @@ private struct ContentPreview: View {
 
     var body: some View {
         switch storage {
-        case .success(let store): ContentView(store: store)
+        case .success(let store): ContentView(store: store, account: GoogleAccount())
         case .failure: Text("Could not create preview storage.")
         }
     }
