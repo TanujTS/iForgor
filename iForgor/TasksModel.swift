@@ -91,6 +91,163 @@ final class TasksModel {
         }
     }
 
+    // MARK: - Changes
+    // Each change shows on screen immediately, marked pending, and is reverted with a message
+    // if Google rejects it. Nothing is retried automatically, so a failure can't create duplicates.
+
+    /// Tasks with a change waiting for Google; their controls are disabled to avoid double submits.
+    private(set) var pendingTaskIDs: Set<String> = []
+    private(set) var isAddingTask = false
+    /// Message for a change that failed; shown as a dismissible banner.
+    var changeError: String?
+
+    func listID(ofTask taskID: String) -> String? {
+        tasksByList.first { $0.value.contains { $0.id == taskID } }?.key
+    }
+
+    func task(withID taskID: String) -> GTask? {
+        tasksByList.values.lazy.flatMap { $0 }.first { $0.id == taskID }
+    }
+
+    /// Creates a task at the top of the selected list. Returns false when it wasn't saved.
+    func addTask(title: String) async -> Bool {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, !isAddingTask, let listID = selectedListID else { return false }
+        isAddingTask = true
+        defer { isAddingTask = false }
+        do {
+            let task = try await api.createTask(in: listID, title: title)
+            tasksByList[listID, default: []].insert(task, at: 0)
+            didChangeTasks()
+            return true
+        } catch {
+            fail("Couldn't add “\(title)”.", error)
+            return false
+        }
+    }
+
+    func setCompleted(_ completed: Bool, task: GTask) {
+        var changed = task
+        changed.status = completed ? "completed" : "needsAction"
+        changed.completed = completed ? ISO8601DateFormatter().string(from: Date()) : nil
+        let fields: [String: Any] = completed ? ["status": "completed"] : ["status": "needsAction", "completed": NSNull()]
+        apply(changed, original: task, fields: fields,
+              failure: completed ? "Couldn't complete “\(task.displayTitle)”." : "Couldn't reopen “\(task.displayTitle)”.")
+    }
+
+    /// Saves edits from the task editor. Returns false (keeping the editor open) when Google rejects them.
+    func updateTask(_ task: GTask, title: String, notes: String, due: DueDate?) async -> Bool {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, let listID = listID(ofTask: task.id) else { return false }
+        let fields: [String: Any] = [
+            "title": title,
+            "notes": notes.isEmpty ? NSNull() : notes,
+            "due": due.map { $0.rfc3339 as Any } ?? NSNull(),
+        ]
+        pendingTaskIDs.insert(task.id)
+        defer { pendingTaskIDs.remove(task.id) }
+        do {
+            let saved = try await api.updateTask(task.id, in: listID, fields: fields)
+            replace(saved, in: listID)
+            didChangeTasks()
+            return true
+        } catch {
+            fail("Couldn't save “\(title)”.", error)
+            return false
+        }
+    }
+
+    func deleteTask(_ task: GTask) {
+        guard let listID = listID(ofTask: task.id), !pendingTaskIDs.contains(task.id) else { return }
+        let before = tasksByList[listID] ?? []
+        tasksByList[listID]?.removeAll { $0.id == task.id || $0.parent == task.id }
+        pendingTaskIDs.insert(task.id)
+        Task {
+            defer { pendingTaskIDs.remove(task.id) }
+            do {
+                try await api.deleteTask(task.id, in: listID)
+                didChangeTasks()
+            } catch {
+                tasksByList[listID] = before
+                fail("Couldn't delete “\(task.displayTitle)”.", error)
+            }
+        }
+    }
+
+    func createList(title: String) async -> Bool {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { return false }
+        do {
+            let list = try await api.createList(title: title)
+            lists.append(list)
+            tasksByList[list.id] = []
+            selectedListID = list.id
+            didChangeTasks()
+            return true
+        } catch {
+            fail("Couldn't create “\(title)”.", error)
+            return false
+        }
+    }
+
+    func renameList(_ list: GTaskList, to title: String) async -> Bool {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty, title != list.title else { return !title.isEmpty }
+        do {
+            let renamed = try await api.renameList(list.id, title: title)
+            if let index = lists.firstIndex(where: { $0.id == list.id }) { lists[index] = renamed }
+            didChangeTasks()
+            return true
+        } catch {
+            fail("Couldn't rename “\(list.title)”.", error)
+            return false
+        }
+    }
+
+    /// Deletes the list and all its tasks in Google.
+    func deleteList(_ list: GTaskList) async {
+        do {
+            try await api.deleteList(list.id)
+            lists.removeAll { $0.id == list.id }
+            tasksByList[list.id] = nil
+            if selectedListID == list.id { selectedListID = lists.first?.id }
+            didChangeTasks()
+        } catch {
+            fail("Couldn't delete “\(list.title)”.", error)
+        }
+    }
+
+    /// Shows `changed` right away, sends `fields` to Google, then keeps Google's version or reverts.
+    private func apply(_ changed: GTask, original: GTask, fields: [String: Any], failure: String) {
+        guard let listID = listID(ofTask: original.id), !pendingTaskIDs.contains(original.id) else { return }
+        replace(changed, in: listID)
+        pendingTaskIDs.insert(original.id)
+        Task {
+            defer { pendingTaskIDs.remove(original.id) }
+            do {
+                let saved = try await api.updateTask(original.id, in: listID, fields: fields)
+                replace(saved, in: listID)
+                didChangeTasks()
+            } catch {
+                replace(original, in: listID)
+                fail(failure, error)
+            }
+        }
+    }
+
+    private func replace(_ task: GTask, in listID: String) {
+        guard let index = tasksByList[listID]?.firstIndex(where: { $0.id == task.id }) else { return }
+        tasksByList[listID]?[index] = task
+    }
+
+    private func didChangeTasks() {
+        saveCache()
+    }
+
+    private func fail(_ action: String, _ error: Error) {
+        changeError = "\(action) \(Self.describe(error))"
+    }
+
     /// Orders open tasks the way Google Tasks does (by position, subtasks under their parent)
     /// and lists completed tasks newest first. Hidden tasks were cleared in Google and are left out.
     static func arrange(_ tasks: [GTask]) -> (open: [TaskRowItem], completed: [GTask]) {

@@ -94,6 +94,17 @@ private struct TasksPanel: View {
     let model: TasksModel
     @Namespace private var pillNamespace
     @State private var showCompleted = false
+    @State private var editingTaskID: String?
+    @State private var newTitle = ""
+    @FocusState private var addFieldFocused: Bool
+    @State private var listEditor: ListEditor?
+    @State private var listToDelete: GTaskList?
+
+    /// The inline list-name field: creating a new list, or renaming an existing one.
+    private struct ListEditor: Equatable {
+        var renaming: GTaskList?
+        var name: String
+    }
 
     private var arrangement: (open: [TaskRowItem], completed: [GTask]) { TasksModel.arrange(model.selectedTasks) }
 
@@ -102,10 +113,24 @@ private struct TasksPanel: View {
         VStack(spacing: 0) {
             header(openCount: arrangement.open.count)
             listPills
+            if model.selectedList != nil { quickAdd }
             taskList(arrangement)
+            if let error = model.changeError { errorBanner(error) }
             footer
         }
+        .animation(Theme.spring, value: model.changeError)
         .onAppear { model.refreshIfStale() }
+        .onChange(of: model.selectedListID) { editingTaskID = nil }
+        .alert("Delete “\(listToDelete?.title ?? "")”?", isPresented: Binding(
+            get: { listToDelete != nil }, set: { if !$0 { listToDelete = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { }
+            Button("Delete", role: .destructive) {
+                if let list = listToDelete { Task { await model.deleteList(list) } }
+            }
+        } message: {
+            Text("This deletes the list and all of its tasks in Google Tasks.")
+        }
     }
 
     private func header(openCount: Int) -> some View {
@@ -131,6 +156,7 @@ private struct TasksPanel: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(IconButtonStyle())
+            .keyboardShortcut("r")
             .help("Refresh")
             .accessibilityLabel("Refresh")
             AccountMenu(model: model)
@@ -145,26 +171,28 @@ private struct TasksPanel: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(model.lists) { list in
-                    let isSelected = list.id == model.selectedListID
+                    if listEditor?.renaming?.id == list.id {
+                        listNameField
+                    } else {
+                        pill(list)
+                    }
+                }
+                if listEditor != nil && listEditor?.renaming == nil {
+                    listNameField
+                } else {
                     Button {
-                        withAnimation(Theme.spring) { model.selectedListID = list.id }
+                        withAnimation(Theme.spring) { listEditor = ListEditor(renaming: nil, name: "") }
                     } label: {
-                        Text(list.title)
-                            .font(.system(size: 12, weight: .medium))
-                            .lineLimit(1)
-                            .padding(.horizontal, 12)
-                            .frame(height: 28)
-                            .foregroundStyle(isSelected ? Theme.background : Theme.secondaryInk)
-                            .background {
-                                if isSelected {
-                                    Capsule().fill(Theme.ink).matchedGeometryEffect(id: "pill", in: pillNamespace)
-                                } else {
-                                    Capsule().strokeBorder(Theme.hairline, lineWidth: 1)
-                                }
-                            }
-                            .contentShape(Capsule())
+                        Image(systemName: "plus")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(Theme.muted)
+                            .frame(width: 28, height: 28)
+                            .overlay(Circle().strokeBorder(Theme.ring, style: StrokeStyle(lineWidth: 1, dash: [3, 2])))
+                            .contentShape(Circle())
                     }
                     .buttonStyle(PressableStyle())
+                    .help("New list")
+                    .accessibilityLabel("New list")
                 }
             }
             .padding(.horizontal, 16)
@@ -172,17 +200,116 @@ private struct TasksPanel: View {
         .padding(.bottom, 12)
     }
 
+    private func pill(_ list: GTaskList) -> some View {
+        let isSelected = list.id == model.selectedListID
+        return Button {
+            withAnimation(Theme.spring) { model.selectedListID = list.id }
+        } label: {
+            Text(list.title)
+                .font(.system(size: 12, weight: .medium))
+                .lineLimit(1)
+                .padding(.horizontal, 12)
+                .frame(height: 28)
+                .foregroundStyle(isSelected ? Theme.background : Theme.secondaryInk)
+                .background {
+                    if isSelected {
+                        Capsule().fill(Theme.ink).matchedGeometryEffect(id: "pill", in: pillNamespace)
+                    } else {
+                        Capsule().strokeBorder(Theme.hairline, lineWidth: 1)
+                    }
+                }
+                .contentShape(Capsule())
+        }
+        .buttonStyle(PressableStyle())
+        .contextMenu {
+            Button("Rename…") { listEditor = ListEditor(renaming: list, name: list.title) }
+            Button("Delete list…", role: .destructive) { listToDelete = list }
+        }
+    }
+
+    private var listNameField: some View {
+        TextField("List name", text: Binding(
+            get: { listEditor?.name ?? "" }, set: { listEditor?.name = $0 }
+        ))
+        .textFieldStyle(.plain)
+        .font(.system(size: 12, weight: .medium))
+        .frame(width: 110)
+        .padding(.horizontal, 12)
+        .frame(height: 28)
+        .overlay(Capsule().strokeBorder(Theme.accent, lineWidth: 1.5))
+        .onSubmit(saveList)
+        .onExitCommand { withAnimation(Theme.spring) { listEditor = nil } }
+        .transition(.scale(scale: 0.8).combined(with: .opacity))
+    }
+
+    private func saveList() {
+        guard let editor = listEditor else { return }
+        Task {
+            let saved = if let list = editor.renaming {
+                await model.renameList(list, to: editor.name)
+            } else {
+                await model.createList(title: editor.name)
+            }
+            if saved || editor.name.trimmingCharacters(in: .whitespaces).isEmpty {
+                withAnimation(Theme.spring) { listEditor = nil }
+            }
+        }
+    }
+
+    private var quickAdd: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "plus")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(addFieldFocused ? Theme.accent : Theme.muted)
+            TextField("Add a task", text: $newTitle)
+                .textFieldStyle(.plain)
+                .font(.system(size: 13))
+                .focused($addFieldFocused)
+                .disabled(model.isAddingTask)
+                .onSubmit(addTask)
+            if model.isAddingTask {
+                ProgressView().controlSize(.mini)
+            } else if !newTitle.isEmpty {
+                Text("⏎")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.muted)
+                    .padding(.horizontal, 5)
+                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Theme.hairline, lineWidth: 1))
+                    .transition(.opacity)
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(height: 40)
+        .background(Theme.field, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .strokeBorder(Theme.accent.opacity(addFieldFocused ? 0.5 : 0), lineWidth: 1))
+        .animation(.easeOut(duration: 0.15), value: addFieldFocused)
+        .animation(.easeOut(duration: 0.15), value: newTitle.isEmpty)
+        .padding(.horizontal, 12)
+        .padding(.bottom, 6)
+    }
+
+    private func addTask() {
+        let title = newTitle
+        Task {
+            if await model.addTask(title: title) {
+                withAnimation(Theme.spring) { newTitle = "" }
+                addFieldFocused = true
+            }
+        }
+    }
+
     private func taskList(_ arrangement: (open: [TaskRowItem], completed: [GTask])) -> some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 0) {
                 if model.lists.isEmpty {
                     EmptyState(symbol: "tray", title: model.isRefreshing ? "Loading your lists…" : "No lists yet",
-                               detail: model.isRefreshing ? nil : "Create a list in Google Tasks, then refresh.")
+                               detail: model.isRefreshing ? nil : "Create one with the + button.")
                 } else if arrangement.open.isEmpty && arrangement.completed.isEmpty {
                     EmptyState(symbol: "checkmark.circle", title: "All clear", detail: "Nothing to do in this list.")
                 } else {
                     ForEach(arrangement.open) { row in
-                        TaskRow(task: row.task, depth: row.depth)
+                        taskView(row.task, depth: row.depth)
                             .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity),
                                                     removal: .opacity))
                     }
@@ -194,11 +321,27 @@ private struct TasksPanel: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 4)
             .animation(Theme.spring, value: arrangement.open)
+            .animation(Theme.spring, value: arrangement.completed)
             .animation(Theme.spring, value: showCompleted)
+            .animation(Theme.spring, value: editingTaskID)
         }
         .scrollIndicators(.never)
         .id(model.selectedListID)
         .transition(.opacity)
+    }
+
+    @ViewBuilder
+    private func taskView(_ task: GTask, depth: Int) -> some View {
+        if editingTaskID == task.id {
+            TaskEditorCard(task: task, model: model) { editingTaskID = nil }
+                .transition(.opacity.combined(with: .scale(scale: 0.98, anchor: .top)))
+        } else {
+            TaskRow(task: task, depth: depth,
+                    isPending: model.pendingTaskIDs.contains(task.id),
+                    onToggle: { model.setCompleted(!task.isCompleted, task: task) },
+                    onEdit: { editingTaskID = task.id },
+                    onDelete: { model.deleteTask(task) })
+        }
     }
 
     private func completedSection(_ completed: [GTask]) -> some View {
@@ -212,6 +355,7 @@ private struct TasksPanel: View {
                         .rotationEffect(.degrees(showCompleted ? 90 : 0))
                     Text("Completed · \(completed.count)")
                         .font(.system(size: 12, weight: .medium))
+                        .contentTransition(.numericText())
                 }
                 .foregroundStyle(Theme.muted)
                 .padding(.horizontal, 12)
@@ -223,10 +367,33 @@ private struct TasksPanel: View {
 
             if showCompleted {
                 ForEach(completed) { task in
-                    TaskRow(task: task, depth: 0)
+                    taskView(task, depth: 0)
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
             }
+        }
+    }
+
+    private func errorBanner(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "exclamationmark.circle.fill").foregroundStyle(Theme.overdue)
+            Text(message).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            Button { model.changeError = nil } label: { Image(systemName: "xmark") }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.muted)
+                .accessibilityLabel("Dismiss")
+        }
+        .font(.system(size: 12))
+        .padding(10)
+        .background(Theme.card, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Theme.hairline, lineWidth: 1))
+        .padding(.horizontal, 12)
+        .padding(.bottom, 8)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
+        .task(id: message) {
+            try? await Task.sleep(for: .seconds(8))
+            if model.changeError == message { model.changeError = nil }
         }
     }
 
