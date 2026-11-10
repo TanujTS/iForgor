@@ -14,11 +14,12 @@ final class GoogleAccount {
         case signedIn(email: String)
     }
 
-    private(set) var status: Status = .checking
-    /// Number of task lists Google returned on the last connection check; proves the token works.
-    private(set) var taskListCount: Int?
-    private(set) var isCheckingConnection = false
+    private(set) var status: Status = .checking {
+        didSet { if email != oldValue.email { onAccountChange?(email) } }
+    }
     var message: String?
+    /// Called with the new email (or nil) whenever the signed-in account changes.
+    @ObservationIgnored var onAccountChange: ((String?) -> Void)?
 
     @ObservationIgnored private var refreshToken: String?
     @ObservationIgnored private var accessToken: String?
@@ -26,11 +27,9 @@ final class GoogleAccount {
     @ObservationIgnored private var pendingSignIn: PendingSignIn?
     private let credentialKey = "credential"
 
-    var email: String? {
-        if case .signedIn(let email) = status { email } else { nil }
-    }
+    var email: String? { status.email }
 
-    /// Restores a saved sign-in at launch, then verifies it with Google.
+    /// Restores a saved sign-in at launch. The first API call verifies it.
     func restore() async {
         do {
             guard let data = try Keychain.read(credentialKey) else {
@@ -40,7 +39,6 @@ final class GoogleAccount {
             let saved = try JSONDecoder().decode(SavedCredential.self, from: data)
             refreshToken = saved.refreshToken
             status = .signedIn(email: saved.email)
-            await checkConnection()
         } catch {
             status = .signedOut
             message = "Saved Google sign-in could not be read. Sign in again. \(error.localizedDescription)"
@@ -115,32 +113,9 @@ final class GoogleAccount {
             refreshToken = newRefreshToken
             keep(tokens)
             status = .signedIn(email: email)
-            await checkConnection()
         } catch {
             status = .signedOut
             message = "Sign-in failed. \(error.localizedDescription)"
-        }
-    }
-
-    /// Fetches the user's task lists to confirm the saved sign-in still grants Tasks access.
-    func checkConnection() async {
-        guard !isCheckingConnection else { return }
-        isCheckingConnection = true
-        defer { isCheckingConnection = false }
-        do {
-            let token = try await validAccessToken()
-            var request = URLRequest(url: URL(string: "https://tasks.googleapis.com/tasks/v1/users/@me/lists?maxResults=100")!)
-            request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-            let (data, response) = try await URLSession.shared.data(for: request)
-            try Self.check(response, data)
-            taskListCount = try JSONDecoder().decode(TaskListsPage.self, from: data).items?.count ?? 0
-            message = nil
-        } catch GoogleError.oauth("invalid_grant") {
-            // Revoked, or expired (refresh tokens last 7 days while the consent screen is in Testing).
-            clearCredentials()
-            message = "Your Google sign-in expired or was revoked. Sign in again."
-        } catch {
-            message = "Could not reach Google Tasks. \(error.localizedDescription)"
         }
     }
 
@@ -172,13 +147,26 @@ final class GoogleAccount {
     func validAccessToken() async throws -> String {
         if let accessToken, accessTokenExpiry > Date().addingTimeInterval(60) { return accessToken }
         guard let refreshToken else { throw GoogleError.notSignedIn }
-        let tokens = try await requestTokens([
-            "client_id": GoogleConfig.clientID,
-            "grant_type": "refresh_token",
-            "refresh_token": refreshToken,
-        ])
-        keep(tokens)
-        return tokens.accessToken
+        do {
+            let tokens = try await requestTokens([
+                "client_id": GoogleConfig.clientID,
+                "grant_type": "refresh_token",
+                "refresh_token": refreshToken,
+            ])
+            keep(tokens)
+            return tokens.accessToken
+        } catch GoogleError.oauth("invalid_grant") {
+            // Revoked, or expired (refresh tokens last 7 days while the consent screen is in Testing).
+            clearCredentials()
+            message = "Your Google sign-in expired or was revoked. Sign in again."
+            throw GoogleError.notSignedIn
+        }
+    }
+
+    /// Forces the next `validAccessToken()` to refresh, e.g. after Google rejects a token with 401.
+    func invalidateAccessToken() {
+        accessToken = nil
+        accessTokenExpiry = .distantPast
     }
 
     private func keep(_ tokens: TokenResponse) {
@@ -191,7 +179,6 @@ final class GoogleAccount {
         refreshToken = nil
         accessToken = nil
         accessTokenExpiry = .distantPast
-        taskListCount = nil
         status = .signedOut
     }
 
@@ -209,7 +196,7 @@ final class GoogleAccount {
 
     /// Converts non-2xx responses into errors. OAuth endpoints return `{"error": "code"}`;
     /// API endpoints return `{"error": {"message": ...}}`.
-    private static func check(_ response: URLResponse, _ data: Data) throws {
+    static func check(_ response: URLResponse, _ data: Data) throws {
         guard let http = response as? HTTPURLResponse else { throw GoogleError.badResponse }
         guard !(200..<300).contains(http.statusCode) else { return }
         if let body = try? JSONDecoder().decode(OAuthErrorBody.self, from: data) {
@@ -251,6 +238,12 @@ final class GoogleAccount {
     }
 }
 
+extension GoogleAccount.Status {
+    var email: String? {
+        if case .signedIn(let email) = self { email } else { nil }
+    }
+}
+
 enum GoogleError: LocalizedError, Equatable {
     case oauth(String)
     case api(status: Int, message: String?)
@@ -265,7 +258,7 @@ enum GoogleError: LocalizedError, Equatable {
         case .api(let status, let message): "Google returned HTTP \(status)\(message.map { ": \($0)" } ?? ".")"
         case .invalidCallback: "Google's response did not match this sign-in request."
         case .missingRefreshToken: "Google did not return a refresh token."
-        case .notSignedIn: "Not signed in."
+        case .notSignedIn: "You're signed out of Google."
         case .badResponse: "Unexpected response from Google."
         }
     }
@@ -300,11 +293,6 @@ private struct APIErrorBody: Decodable {
 
 private struct IDTokenClaims: Decodable {
     let email: String?
-}
-
-private struct TaskListsPage: Decodable {
-    struct Item: Decodable { let id: String }
-    let items: [Item]?
 }
 
 private extension Data {
